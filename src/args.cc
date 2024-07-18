@@ -127,7 +127,7 @@ utils::Multimap ObjectConditionalReadArgs::Headers() const {
 utils::Multimap ObjectConditionalReadArgs::CopyHeaders() const {
   utils::Multimap result_headers;
 
-  std::string copy_source = curlpp::escape("/" + bucket + "/" + object);
+  std::string copy_source = "/" + bucket + "/" + object;
   if (!version_id.empty()) {
     copy_source += "?versionId=" + curlpp::escape(version_id);
   }
