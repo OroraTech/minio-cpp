@@ -436,6 +436,8 @@ Response Request::execute() {
     fd_set fdwrite{};
     fd_set fdexcep{};
     int maxfd = 0;
+    struct timeval tv;
+    struct timeval *tvptr = nullptr;
 
     FD_ZERO(&fdread);
     FD_ZERO(&fdwrite);
@@ -443,9 +445,18 @@ Response Request::execute() {
 
     requests.fdset(&fdread, &fdwrite, &fdexcep, &maxfd);
 
-    if (select(maxfd + 1, &fdread, &fdwrite, &fdexcep, nullptr) < 0) {
-      std::cerr << "select() failed; this should not happen" << std::endl;
-      std::terminate();
+    if (maxfd < 0) {
+      tv.tv_sec = 0;
+      tv.tv_usec = 100000;
+      tvptr = &tv;
+      std::cerr << "curlpp::fdset(): no file descriptors to select! waiting instead" << std::endl;
+    }
+
+    if (select(maxfd + 1, &fdread, &fdwrite, &fdexcep, tvptr) < 0) {
+      std::cerr << "select() interrupted" << std::endl;
+      Response err;
+      err.error = std::string("curlpp::select() interrupted");
+      return err;
     }
     while (!requests.perform(&left)) {
     }
