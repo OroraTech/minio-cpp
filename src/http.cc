@@ -22,7 +22,6 @@
 #include <curlpp/Easy.hpp>
 #include <curlpp/Exception.hpp>
 #include <curlpp/Infos.hpp>
-#include <curlpp/Multi.hpp>
 #include <curlpp/Options.hpp>
 #include <curlpp/cURLpp.hpp>
 #include <exception>
@@ -46,6 +45,10 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#endif
+
+#ifndef CURL_WRITEFUNC_ERROR
+#define CURL_WRITEFUNC_ERROR static_cast<size_t>(0xFFFFFFFF)
 #endif
 
 namespace minio::http {
@@ -273,16 +276,14 @@ error::Error Response::ReadHeaders() {
   return error::SUCCESS;
 }
 
-size_t Response::ResponseCallback(curlpp::Multi* const requests,
-                                  curlpp::Easy* const request,
+size_t Response::ResponseCallback(curlpp::Easy* const request,
                                   const char* const buffer, size_t size,
                                   size_t length) {
   size_t realsize = size * length;
 
   // If error occurred previously, just cancel the request.
   if (!error.empty()) {
-    requests->remove(request);
-    return realsize;
+    return CURL_WRITEFUNC_ERROR;
   }
 
   if (!status_code_read_ || !headers_read_) {
@@ -292,8 +293,7 @@ size_t Response::ResponseCallback(curlpp::Multi* const requests,
   if (!status_code_read_) {
     if (error::Error err = ReadStatusCode()) {
       error = err.String();
-      requests->remove(request);
-      return realsize;
+      return CURL_WRITEFUNC_ERROR;
     }
 
     if (!status_code_read_) return realsize;
@@ -302,8 +302,7 @@ size_t Response::ResponseCallback(curlpp::Multi* const requests,
   if (!headers_read_) {
     if (error::Error err = ReadHeaders()) {
       error = err.String();
-      requests->remove(request);
-      return realsize;
+      return CURL_WRITEFUNC_ERROR;
     }
 
     if (!headers_read_ || response_.empty()) return realsize;
@@ -312,7 +311,7 @@ size_t Response::ResponseCallback(curlpp::Multi* const requests,
     if (datafunc != nullptr && status_code >= 200 && status_code <= 299) {
       DataFunctionArgs args(request, this, std::string(this->response_),
                             userdata);
-      if (!datafunc(args)) requests->remove(request);
+      if (!datafunc(args)) return CURL_WRITEFUNC_ERROR;
     } else {
       body = response_;
     }
@@ -323,7 +322,7 @@ size_t Response::ResponseCallback(curlpp::Multi* const requests,
   // If data function is set and the request is successful, send data.
   if (datafunc != nullptr && status_code >= 200 && status_code <= 299) {
     DataFunctionArgs args(request, this, std::string(buffer, length), userdata);
-    if (!datafunc(args)) requests->remove(request);
+    if (!datafunc(args)) return CURL_WRITEFUNC_ERROR;
   } else {
     body.append(buffer, length);
   }
@@ -343,7 +342,6 @@ Request::Request(Method method, Url url) {
 Response Request::execute() {
   curlpp::Cleanup cleaner;
   curlpp::Easy request;
-  curlpp::Multi requests;
 
   // Request settings.
   request.setOpt(new curlpp::options::CustomRequest{MethodToString(method)});
@@ -403,8 +401,7 @@ Response Request::execute() {
 
   using namespace std::placeholders;
   request.setOpt(new curlpp::options::WriteFunction(
-      std::bind(&Response::ResponseCallback, &response, &requests, &request, _1,
-                _2, _3)));
+      std::bind(&Response::ResponseCallback, &response, &request, _1, _2, _3)));
 
   auto progress =
       [&progressfunc = progressfunc, &progress_userdata = progress_userdata](
@@ -425,31 +422,8 @@ Response Request::execute() {
     request.setOpt(new curlpp::options::ProgressFunction(progress));
   }
 
-  int left = 0;
-  requests.add(&request);
-
   // Execute.
-  while (!requests.perform(&left)) {
-  }
-  while (left) {
-    fd_set fdread{};
-    fd_set fdwrite{};
-    fd_set fdexcep{};
-    int maxfd = 0;
-
-    FD_ZERO(&fdread);
-    FD_ZERO(&fdwrite);
-    FD_ZERO(&fdexcep);
-
-    requests.fdset(&fdread, &fdwrite, &fdexcep, &maxfd);
-
-    if (select(maxfd + 1, &fdread, &fdwrite, &fdexcep, nullptr) < 0) {
-      std::cerr << "select() failed; this should not happen" << std::endl;
-      std::terminate();
-    }
-    while (!requests.perform(&left)) {
-    }
-  }
+  request.perform();
 
   if (progressfunc != nullptr) {
     ProgressFunctionArgs args;
